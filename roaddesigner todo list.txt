@@ -1,0 +1,42 @@
+You have done:
+
+X Wrapper class for Trimesh for textured meshes
+X Deal with intersects
+X Over/under intersection types as well
+X Use something better than linear interpolation for height
+X Switch interface from modal menu to lasso/pie menu
+X Over-sketching tracks
+X Get twist lens and breakout view into the new interaction method
+X Speed up computation when editing height with twist lens
+X Get over/under under/over switching happening
+X Camera interpolation for camera changes (return to origin view, move to play view, etc.)
+X Added "most selected edge" functionality to resolve which road selection ambiguity (for twist lens, play, etc.)
+X Area add trees and stuff...  They get removed as roads are drawn through them
+X Consider multitexturing on the terrain (detail textures so it looks nicer)
+X Get road "continuing" happening (just like over-under joins without having to go over or under)
+X Bridges for height elevations
+X A car driving along the road during playback
+X Bridge for water crossings (water height, object scales contained in external file for each image pair?)
+X Pillars
+X "Make clothoidal" option
+X Do something about the terrain/road interpenetration:	
+X Maya-like cam control
+X Make OBJECTS twist in the view too
+X Road warning signs (S curve, sharp turns, etc.) and lampposts (halfway done, curvature estimation integrated into edge somewhat, and models done!)..  You can probably do this easy by doing the cheap method for pillars
+X Can avoid choppy input curves by not redrawing entire scene
+X Tunnels (maybe done using clip-planes?) for height changes
+X Twistlens - incident camera angle should have an effect on when that back plane gets drawn
+X Track import/export
+X Stencil stuff for tunnels
+X More rich depth relationships/ways to deal with that stuff
+
+Bug:
+
+- View twist, LOD mesh has slight gaps in it...  Modify twistlens to set twists for lower LOD edges to have these gaps filled by checking the neighbours (same thing as normal, but when twisting as well)
+- Stencil stuff for tunnels not working that well
+
+You must do:
+- Preset camera changes, use an alternate menu in play mode
+- The coil idea (option for closed loop)
+- Banking (slight twist) when the road turns
+- Get everything ready for the "great demo"

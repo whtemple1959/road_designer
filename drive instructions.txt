@@ -1,0 +1,23 @@
+Instructions
+
+To get started, run the "river256.bat" file.  This loads the application with a heightmap and texture.  (You can run the main exe file, but it starts it up with a boring green plane).
+
+Open curves draw paths.  Closed curves invoke a menu, the commands available act on what you select in the closed curve.
+
+Camera controls are Maya-like.  Hold the ALT button, and dragging left/middle/right mouse buttons does rotate/view plane translate/zoom.  If you press F you return to the initial view.
+
+If you draw paths from above in these patterns:
+
+  |     |     |
+--|-- --+-- -----
+  |     |     |
+
+they denote depth relationships between the two paths.  It is possible to have numerous depth relationships near each other to create more complicated kinds of paths.  You can manually change the relation later if you want, by selecting the intersection, and choosing either of the other 2 available relationships in the menu.
+
+You can use the twist lens to make height changes to the paths.  Select a local section of path, and choose the Twist Lens command.  If you sketch open curves within the inner lens, this oversketches the path and edits its height.  If there are multiple paths selected by your lasso, it binds to the path "most selected".  To make the Twist Lens disappear, you can hit ESCAPE, or move the camera.
+
+The "Breakout View" also allows for height changes to the paths.  In this case though, you are presented with an orthographic point of view of the path selected.  Oversketching within this view also changes the height of the path.  ESCAPE or camera motion closes this view as well.
+
+I have added Load/Save track functionality, it would be great if you are feeling creative to get some examples that I might put up in a gallery section at the end of the paper.  At the moment to save a track, you hold S for Save and draw a Lasso, a special menu comes up.  Choose one of the 4 slots and it saves the file using the name slot(1-4).dat.  If you want to load up your own tracks later, same thing but hold the L button for Load and choose the slot.
+
+If you want to drive through a certain section of track, select it and choose Play.  Right now a car just drives along it at uniform speed - I want to make this more fun for the demo (preset camera views, speed based on path curvature, brake-lights, jumps, etc.)
