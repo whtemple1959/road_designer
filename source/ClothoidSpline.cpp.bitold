@@ -1,0 +1,1613 @@
+#include "ClothoidSpline.h"
+
+#define DRAW_LINEWIDTH 5
+
+vector <Vector> ClothoidSpline::colorSegments;
+
+ClothoidSpline::ClothoidSpline(RN_Edge *edge, float penalty) {
+
+	ClothoidSpline(edge, 0, edge->getNumPoints()-1, penalty);
+
+}
+
+/*
+ * start to endpoint is inclusive range of points to be covered
+ */
+ClothoidSpline::ClothoidSpline(RN_Edge *edge, int startPoint, int endPoint, float penalty, float cFactor) {
+
+	curvatureFactor=cFactor;
+
+	if (colorSegments.empty()) {
+		colorSegments.push_back(Vector(0.8,0,0));
+		colorSegments.push_back(Vector(0,.8,0));
+		colorSegments.push_back(Vector(0,0,.8));
+		colorSegments.push_back(Vector(.8,0,.8));
+		colorSegments.push_back(Vector(0,.8,.8));
+		colorSegments.push_back(Vector(.8,.8,0));	
+		colorSegments.push_back(Vector(.6,.5,.2));			
+	}
+
+	edgeToFit=edge;
+
+	//Steps:
+
+	//1 - construct curvature plot of sketched edge
+	//2 - fit small number of connected line segments 
+	//		across entire plot (attempting to minimize error)	
+	//3 - Flatten slope of line segments whose slope below threshold
+	//4 - Find transformation (translation and rotation) that produces
+	//		the best fit between clothoid spline and sketched pointset	
+
+	for (int i=startPoint;i<=endPoint;i++) {
+		Vector eachProjPoint=edge->getPoint(i);
+		eachProjPoint.y=0.0f;
+		edgePointSet.push_back(eachProjPoint);	
+	}
+
+	//for (float f=0.0f;f<1.5f*3.14159;f+=0.5) {
+	//	edgePointSet.push_back(Vector(40.0+sin(f)*10.0f,0.0f,80.0f-f*15.0f));
+	//}
+
+	/*
+	float xtrans=-100;
+	float ztrans=-200;
+	edgePointSet.push_back(Vector(133+xtrans,0,233+ztrans));
+		//	edgePointSet.push_back(Vector(140+xtrans,0,207+ztrans));
+		//edgePointSet.push_back(Vector(148+xtrans,0,190+ztrans));
+		//	edgePointSet.push_back(Vector(157+xtrans,0,173+ztrans));
+	edgePointSet.push_back(Vector(166+xtrans,0,160+ztrans));
+		//	edgePointSet.push_back(Vector(174+xtrans,0,150+ztrans));
+		//edgePointSet.push_back(Vector(181+xtrans,0,143+ztrans));
+		//	edgePointSet.push_back(Vector(189+xtrans,0,138+ztrans));
+	edgePointSet.push_back(Vector(199+xtrans,0,133+ztrans));
+		//	edgePointSet.push_back(Vector(207+xtrans,0,132+ztrans));
+		//edgePointSet.push_back(Vector(218+xtrans,0,131+ztrans));
+		//	edgePointSet.push_back(Vector(226+xtrans,0,133+ztrans));
+	edgePointSet.push_back(Vector(234+xtrans,0,136+ztrans));
+		//	edgePointSet.push_back(Vector(242+xtrans,0,142+ztrans));
+		//edgePointSet.push_back(Vector(252+xtrans,0,152+ztrans));
+		//	edgePointSet.push_back(Vector(258+xtrans,0,159+ztrans));
+	edgePointSet.push_back(Vector(266+xtrans,0,169+ztrans));
+		//	edgePointSet.push_back(Vector(273+xtrans,0,177+ztrans));
+		//edgePointSet.push_back(Vector(280+xtrans,0,183+ztrans));
+		//	edgePointSet.push_back(Vector(288+xtrans,0,190+ztrans));
+	edgePointSet.push_back(Vector(299+xtrans,0,193+ztrans));
+		//	edgePointSet.push_back(Vector(309+xtrans,0,194+ztrans));
+		//edgePointSet.push_back(Vector(319+xtrans,0,192+ztrans));
+		//	edgePointSet.push_back(Vector(326+xtrans,0,189+ztrans));
+	edgePointSet.push_back(Vector(332+xtrans,0,183+ztrans));
+	*/
+
+	for (int i=0;i<edgePointSet.size();i++) {
+		float eachArcLength=0.0f;
+		for (int j=0;j<i;j++) 
+			eachArcLength+=(edgePointSet[j+1]-edgePointSet[j]).GetLength();
+
+		arcLength.push_back(eachArcLength);
+	}
+
+	//1 - Curvature estimation:
+	//		(using the trimesh2 library to do this estimation)
+	estCurv=ClothoidSpline::getCurvatures(edgePointSet);	
+	//karanEstCurv=ClothoidSpline::getKaranCurvatures(edgePointSet);	
+
+	//2.5 - modify curvatures (for straight/twisty feature)
+	for (int i=0;i<estCurv.size();i++) {
+		if (curvatureFactor<1.0f)
+			estCurv[i]*=curvatureFactor;		
+		else if (curvatureFactor>1.0f) {
+			//add seasaw like noise 
+			float seasawFloat=(i%(int)(estCurv.size()/3.0f))/(estCurv.size()/6.0f);
+			
+			float seasawLow=-0.1f;
+			float seasawHi=0.1f;
+
+			if (seasawFloat<1.0f)
+				seasawFloat=seasawLow*(1.0f-seasawFloat)+seasawHi*seasawFloat;
+			else {
+				seasawFloat=seasawFloat-1.0f;
+				seasawFloat=seasawHi*(1.0f-seasawFloat)+seasawLow*seasawFloat;
+			}
+			
+			estCurv[i]+=seasawFloat;
+		}
+	}
+
+	//memorize the min/max (for 2d plots drawing later)
+	minCurv=1000000.0;
+	maxCurv=-1000000.0;
+	for (int i=1;i<edgePointSet.size()-1;i++) {
+		if (estCurv[i]<minCurv)
+			minCurv=estCurv[i];
+		if (estCurv[i]>maxCurv)
+			maxCurv=estCurv[i];
+	}
+
+	//2 - fit small number of connected line segments 
+	//		across entire plot (attempting to minimize error)
+	//		using dynamic programming approach
+
+	vector <vector <float>> errorMatrix(edgePointSet.size(), vector<float>(edgePointSet.size(),0));
+	vector <vector <int>> walkMatrix(edgePointSet.size(), vector<int>(edgePointSet.size(),0));
+	vector <vector <float>> AMatrix(edgePointSet.size(), vector<float>(edgePointSet.size(),0));
+	vector <vector <float>> BMatrix(edgePointSet.size(), vector<float>(edgePointSet.size(),0));
+
+	for (int i=0;i<edgePointSet.size();i++) {
+		for (int j=0;j<edgePointSet.size();j++) {
+			errorMatrix[i][j]=0.0;
+			walkMatrix[i][j]=-1;
+		}
+	}
+
+	//populate first diagonal (cost of line segment between neighbouring points)
+	float eachSegmentCost=penalty;
+	for (int i=0;i+1<edgePointSet.size();i++) {
+		errorMatrix[i][i+1]=eachSegmentCost;
+		Vector2 *points=new Vector2[2];
+		points[0]=Vector2(arcLength[i],estCurv[i]);
+		points[1]=Vector2(arcLength[i+1],estCurv[i+1]);
+		HeightLineFit2(2, points, AMatrix[i][i+1], BMatrix[i][i+1]);
+	}
+
+	//iterate through remaining diagonals
+	for (int j=2;j<edgePointSet.size();j++) { //
+		for (int i=0;i+j<edgePointSet.size();i++) {
+
+			//do linear regression on segments between i and i+j inclusive
+			//if that error + penalty for segment is less than 
+			//	sum of errors [i][i+j-1] and [i+1][i+j], then use
+			//	that
+			//otherwise, use sum of [i][i+j-1] and [i+1][i+j]
+			
+			Vector2 *points=new Vector2[j+1];
+			for (int each=i;each<=i+j;each++) {				
+				points[each-i]=Vector2(arcLength[each],estCurv[each]);
+			}
+
+			HeightLineFit2(j+1, points, AMatrix[i][i+j], BMatrix[i][i+j]);
+			float fitError=getFitErrors(j+1, points, AMatrix[i][i+j], BMatrix[i][i+j]);
+
+			float minError=fitError+eachSegmentCost;
+			int minIndex=-1;
+
+			for (int each=i+1;each<i+j;each++) { //check each partitioning at this level
+				if (errorMatrix[i][each]+errorMatrix[each][i+j]<minError) {
+					minIndex=each;
+					minError=errorMatrix[i][each]+errorMatrix[each][i+j];					
+				}
+			}
+			
+			walkMatrix[i][i+j]=minIndex;			
+			errorMatrix[i][i+j]=minError;
+			
+		}
+	}	
+
+	/*
+	//dump out the error matrix (for debugging)
+	for (int i=0;i<numPoints;i++) {
+		for (int j=0;j<numPoints;j++) {
+			printf("%.4f ",errorMatrix[i][j]);
+		}
+		printf("\n");
+	}
+
+	//dump out the walk matrix (for debugging)
+	for (int i=0;i<numPoints;i++) {
+		for (int j=0;j<numPoints;j++) {			
+			printf("%i\t",walkMatrix[i][j]);
+		}
+		printf("\n");
+	}
+	*/
+
+	//use walk matrix and determine partitions
+	bool *segmentEnd=new bool[edgePointSet.size()];
+	for (int i=0;i<edgePointSet.size();i++) {
+		segmentEnd[i]=false;
+	}
+	recurseThroughWalkMatrix(walkMatrix, 0, edgePointSet.size()-1, segmentEnd);
+
+	//intersect linear regressed lines
+	int endIndex;
+	int endNextIndex;
+
+	for (int j=1;j<edgePointSet.size();j++) {
+		if (segmentEnd[j]) {
+			endIndex=j;
+			break;
+		}
+	}
+	segmentPointSet.push_back(Vector(0.0f,BMatrix[0][endIndex],0.0f));
+	for (int i=0;i<edgePointSet.size()-1;i++) {
+		if (segmentEnd[i]) {			
+			for (int j=i+1;j<edgePointSet.size();j++) {
+				if (segmentEnd[j]) {
+					endIndex=j;
+					break;
+				}
+			}
+
+			float A1=AMatrix[i][endIndex];
+			float B1=BMatrix[i][endIndex];
+
+			endNextIndex=endIndex;
+			for (int j=endIndex+1;j<edgePointSet.size();j++) {
+				if (segmentEnd[j]) {
+					endNextIndex=j;
+					break;
+				}
+			}			
+
+			if (endNextIndex>endIndex) { //this is an intersection between two lines
+
+				float A2=AMatrix[endIndex][endNextIndex];
+				float B2=BMatrix[endIndex][endNextIndex];
+
+				float xintersect=(B2-B1)/(A1-A2);
+				float yintersect=A1*xintersect+B1;
+
+				segmentPointSet.push_back(Vector(xintersect,yintersect,0.0f));
+			}
+			else { //this is the last line (hence no intersection)
+
+				segmentPointSet.push_back(Vector(arcLength[edgePointSet.size()-1],A1*arcLength[edgePointSet.size()-1]+B1,0.0f));
+				break;
+			}
+
+		}
+	}
+
+	//some intersection points "overshoot" (causing the linearly interpolated
+	//segmentPointSet) not to be a function any more, we have to go through
+	//and remove these points
+	bool foundOvershoot;
+	do {
+		foundOvershoot=false;
+		for (int i=1;i<segmentPointSet.size()-1;i++) {
+			if ((segmentPointSet[i].x>segmentPointSet[i+1].x&&segmentPointSet[i].x>segmentPointSet[i-1].x)||
+				(segmentPointSet[i].x<segmentPointSet[i-1].x&&segmentPointSet[i].x<segmentPointSet[i+1].x)) {
+				segmentPointSet.erase(segmentPointSet.begin()+i);				
+				foundOvershoot=true;
+				break;
+			}
+		}
+	} while (foundOvershoot);
+
+	//Matrix cleanup
+	errorMatrix.clear();
+	walkMatrix.clear();
+	AMatrix.clear();
+	BMatrix.clear();	
+
+	//3 - Flatten slope of line segments whose slope below threshold
+
+	for (int i=0;i<segmentPointSet.size()-1;i++) {
+
+		//turn clothoid into circle segment if slope is low enough
+		if (fabs(segmentPointSet[i+1].y-segmentPointSet[i].y)<MIN_CURVATURE_SLOPE) {
+			float midpoint=(segmentPointSet[i].y+segmentPointSet[i+1].y)/2.0;
+
+			segmentPointSet[i].y=midpoint;
+			segmentPointSet[i+1].y=midpoint;
+		}
+
+		//turn circle segment into line segment if close enough to x-axis
+		if (segmentPointSet[i+1].y==segmentPointSet[i].y&&fabs(segmentPointSet[i].y)<MIN_DISTANCE_FROM_ZERO) {
+			segmentPointSet[i].y=0.0f;
+			segmentPointSet[i+1].y=0.0f;
+		}
+
+	}
+
+	//4 - Find transformation (translation and rotation) that produces
+	//		the best fit between clothoid spline and sketched pointset
+	
+	//* OVERRIDE FOR THAT GUYS THESIS PIC
+	//maxArcLength=140.0f;
+
+	//Overwrite segment pointset
+	/*
+	float upCurvFloat=-0.09;
+	segmentPointSet.clear();
+	segmentPointSet.push_back(Vector(0,0,0));
+	segmentPointSet.push_back(Vector(20,0,0));
+	segmentPointSet.push_back(Vector(40,upCurvFloat,0));
+	segmentPointSet.push_back(Vector(60,upCurvFloat,0));
+	segmentPointSet.push_back(Vector(80,0,0));
+	segmentPointSet.push_back(Vector(100,0,0));
+	segmentPointSet.push_back(Vector(120,-upCurvFloat,0));
+	segmentPointSet.push_back(Vector(140,-upCurvFloat,0));
+	fitTranslate=Vector(64,0,80);
+	fitRotate=90.0f;
+
+	maxCurv=upCurvFloat;
+	minCurv=-upCurvFloat;
+	maxArcLength=140.0f;
+	*/
+
+	/* BASIC CLOTHOID EXAMPLE
+	segmentPointSet.clear();
+	segmentPointSet.push_back(Vector(0,-1.15,0));
+	segmentPointSet.push_back(Vector(100,1.15,0));
+	minCurv=-1.15;
+	maxCurv=1.15;
+	maxArcLength=100.0f;
+	*/
+
+	/* OVER RIDE FOR CHANGING B
+	float upCurvFloat=-0.001f;
+	segmentPointSet.clear();
+	segmentPointSet.push_back(Vector(0,0,0));
+	segmentPointSet.push_back(Vector(50,upCurvFloat,0));
+	fitTranslate=Vector(64,0,80);
+	fitRotate=90.0f;
+	maxArcLength=50;
+
+	maxCurv=upCurvFloat;
+	minCurv=-upCurvFloat;
+	*/	
+
+	//g2 discontinuity hack
+	//approach: insert a 0-length segment where the curvature spike is
+	/*
+	float discontThreshold=0.1;
+
+	for (int i=1;i<segmentPointSet.size()-1;i++) {
+		if (fabs(segmentPointSet[i].y)>discontThreshold&&
+			fabs(segmentPointSet[i-1].y)<discontThreshold&&
+			fabs(segmentPointSet[i+1].y)<discontThreshold) {
+			printf("We should break it here: %i since %f %f %f \n",i,segmentPointSet[i-1].y,
+				segmentPointSet[i].y,segmentPointSet[i+1].y);
+
+			bool positive;
+			//the z segment will contain a rotation!
+			if (segmentPointSet[i].y>0.0f)
+				positive=true;
+			else
+				positive=false;
+			
+			segmentPointSet[i].y=0.0f;
+			
+			segmentPointSet.erase(segmentPointSet.begin()+i+1); //(since i is 1 back now)
+			segmentPointSet.erase(segmentPointSet.begin()+i-1);
+
+			//get the angle...  it will be given from the dot product of the edge point
+			//line segments, near where the segment endpoint is (location segmentPointSet[i].x)
+			int closestIndex=-1;
+			float closestVal=9999999.9f;
+			for (int j=0;j<arcLength.size();j++) {
+				if (fabs(segmentPointSet[i-1].x-arcLength[j])<closestVal) {
+					closestVal=fabs(segmentPointSet[i-1].x-arcLength[j]);
+					closestIndex=j;
+				}
+			}
+			float angleToRotate=180.0f-acosf((edgePointSet[closestIndex+2]-edgePointSet[closestIndex]).getNormal().DotProduct3
+				((edgePointSet[closestIndex-2]-edgePointSet[closestIndex]).getNormal()))*180.0f/3.14159f;
+
+			printf("Angle to rotate: %f\n",angleToRotate);
+
+			if (positive)
+				segmentPointSet.insert(segmentPointSet.begin()+i,Vector(segmentPointSet[i-1].x,0.0f,angleToRotate));
+			else
+				segmentPointSet.insert(segmentPointSet.begin()+i,Vector(segmentPointSet[i-1].x,0.0f,-angleToRotate));
+		}
+	}
+	*/
+
+	setupCanonicalSegments();	
+	setupArcLengthSamples();
+	setupFitTransform(1.0f);	
+
+	maxArcLength=arcLength[edgePointSet.size()-1];	
+
+	//fitTranslate=centreSketch-centreSpline;
+	//fitTranslate=Vector(0,0,0);
+	//fitRotate=0.0f;
+
+}
+
+ClothoidSpline::~ClothoidSpline() {
+
+	estCurv.clear();
+	arcLength.clear();
+
+	segmentPointSet.clear();
+	segmentTranslate.clear();
+	segmentRotate.clear();
+
+}
+
+/*
+vector <float> ClothoidSpline::getKaranCurvatures(vector <Vector> theEdgePointSet) {
+
+	for (int i=0;i<theEdgePointSet.size();i++)
+		theEdgePointSet[i].y=0.0f;
+
+	vector <float> curvVec;
+
+	curvVec.reserve(theEdgePointSet.size());
+	curvVec.push_back(0.0f);
+	for (int i=1;i<theEdgePointSet.size()-1;i++) {
+		//curvature given by: 2*sin(theta/2), and where sign is given by sign of cross product
+
+		Vector vec1=theEdgePointSet[i]-theEdgePointSet[i-1];
+		Vector vec2=theEdgePointSet[i+1]-theEdgePointSet[i];
+		vec1.Normal();
+		vec2.Normal();
+
+		float dotProd=vec1.DotProduct3(vec2);
+		float theta;
+		if (dotProd>1.0)
+			theta=0.0f;
+		else if (dotProd<-1.0)
+			theta=3.14159f;
+		else
+			theta=acosf(dotProd);
+		
+		Vector signVec;
+		signVec.CrossProduct(vec1,vec2);	
+			
+		//float curvVal=2.0f*sin(theta/2.0f)/sqrt((theEdgePointSet[i]-theEdgePointSet[i-1]).GetLength())/sqrt((theEdgePointSet[i+1]-theEdgePointSet[i]).GetLength());
+		//karan's correction
+		float curvVal=sqrt(2.0f)*sin(theta/2.0f)/sqrt((theEdgePointSet[i]-theEdgePointSet[i-1]).GetLength()+(theEdgePointSet[i+1]-theEdgePointSet[i]).GetLength());		
+
+		curvVec.push_back(curvVal);
+		if (signVec.y>0.0f)
+			curvVec[i]=-curvVec[i];
+	}
+	curvVec.push_back(0.0f);
+
+	curvVec[0]=curvVec[1];
+	curvVec[curvVec.size()-1]=curvVec[curvVec.size()-2];
+
+	return curvVec;
+
+}
+*/
+
+vector <float> ClothoidSpline::getCurvatures(vector <Vector> theEdgePointSet) {
+
+	/*
+	TriMesh *curvatureMesh=new TriMesh();
+	vector <float> curvVec;
+
+	curvatureMesh->vertices.reserve(theEdgePointSet.size()*2);
+	for (int i=0;i<theEdgePointSet.size();i++) {
+		mkpoint(curvatureMesh,theEdgePointSet[i].x,0,theEdgePointSet[i].z);
+		mkpoint(curvatureMesh,theEdgePointSet[i].x,1,theEdgePointSet[i].z);
+	}
+
+	curvatureMesh->faces.reserve((theEdgePointSet.size()-1)*2);
+	for (int i=0;i<theEdgePointSet.size()-1;i++) {
+		mkquad(curvatureMesh,i*2,i*2+1,i*2+2,i*2+3);
+	}
+
+	curvatureMesh->need_curvatures();
+
+	//populate the estCurv matrix	
+	for (int i=0;i<theEdgePointSet.size();i++) {
+		curvVec.push_back(curvatureMesh->curv1[i*2]);
+	}
+
+	//clean up curvature mesh
+	delete curvatureMesh;
+
+	return curvVec;
+	*/
+
+	for (int i=0;i<theEdgePointSet.size();i++)
+		theEdgePointSet[i].y=0.0f;
+
+	vector <float> curvVec;
+
+	curvVec.reserve(theEdgePointSet.size());
+	curvVec.push_back(0.0f);
+	for (int i=1;i<theEdgePointSet.size()-1;i++) {
+		//curvature given by: 2*sin(theta/2), and where sign is given by sign of cross product
+
+		Vector vec1=theEdgePointSet[i]-theEdgePointSet[i-1];
+		Vector vec2=theEdgePointSet[i+1]-theEdgePointSet[i];
+		vec1.Normal();
+		vec2.Normal();
+
+		float dotProd=vec1.DotProduct3(vec2);
+		float theta;
+		if (dotProd>1.0)
+			theta=0.0f;
+		else if (dotProd<-1.0)
+			theta=3.14159f;
+		else
+			theta=acosf(dotProd);
+		
+		Vector signVec;
+		signVec.CrossProduct(vec1,vec2);
+
+		/*
+		printf("vec1: ");
+		vec1.print();
+		printf(" vec 2: ");
+		vec2.print();
+		printf(" dotprod: %f theta: %f sign: %f 2sin(theta/2): %f\n",vec1.DotProduct3(vec2), theta, signVec.y, 2.0f*sin(theta/2.0f));
+		*/
+			
+		float curvVal=2.0f*sin(theta/2.0f)/sqrt((theEdgePointSet[i]-theEdgePointSet[i-1]).GetLength())/sqrt((theEdgePointSet[i+1]-theEdgePointSet[i]).GetLength());
+		//karan's correction
+		/*
+		float karanCurvVal=sqrt(2.0f)*sin(theta/2.0f)/sqrt((theEdgePointSet[i]-theEdgePointSet[i-1]).GetLength()+(theEdgePointSet[i+1]-theEdgePointSet[i]).GetLength());
+		printf("Curvature %i: mine %f karan's %f factor diff %f\n",i,curvVal,karanCurvVal, karanCurvVal/curvVal);
+		*/
+
+		curvVec.push_back(curvVal);
+		if (signVec.y>0.0f)
+			curvVec[i]=-curvVec[i];
+	}
+	curvVec.push_back(0.0f);
+
+	curvVec[0]=curvVec[1];
+	curvVec[curvVec.size()-1]=curvVec[curvVec.size()-2];
+
+	return curvVec;
+
+}
+
+float ClothoidSpline::getPiecePenalty() {
+
+	return piecePenalty;
+
+}
+
+void ClothoidSpline::setupCanonicalSegments() {
+
+	//set up the translate/rotates for each segment
+
+	segmentTranslate.clear();
+	segmentRotate.clear();
+
+	segmentTranslate.push_back(Vector(0,0,0));
+	segmentRotate.push_back(0.0f);
+
+	for (int i=1;i<segmentPointSet.size();i++) {
+
+		Vector eachTranslate=segmentTranslate[i-1];
+		float eachRotate=segmentRotate[i-1];
+
+		float curv1=segmentPointSet[i-1].y;
+		float curv2=segmentPointSet[i].y;	
+
+		if (!(fabs(curv2-curv1)<MIN_CURVATURE_SLOPE)) {//CLOTHOID CASE		
+
+			float eachLength=segmentPointSet[i].x-segmentPointSet[i-1].x;
+			float B=sqrt(eachLength/(PI*fabs(curv2-curv1)));			
+
+			float t1=curv1*B*CURV_FACTOR;
+			float t2=curv2*B*CURV_FACTOR;			
+			
+			//printf("t1: %f t2: %f B: %f\n",t1,t2,B);
+
+			Vector transVec=getClothoidPiecePoint(t1,t2,t2);
+			transVec=transVec*PI*B;		
+			
+			//rotate for the end of this piece
+			float rotAmount;
+			
+			if (t2>t1) {
+				rotAmount=(t2*t2-t1*t1)*180.0/PI;				
+			}
+			else {
+				rotAmount=(t1*t1-t2*t2)*180.0/PI;				
+			}
+
+			segmentTranslate.push_back(eachTranslate+transVec.GetRotatedY(eachRotate));
+			segmentRotate.push_back(eachRotate-rotAmount);			
+
+		}
+		else if (fabs(curv2-curv1)<MIN_CURVATURE_SLOPE&&(fabs(curv1)<MIN_CURVATURE_SLOPE||fabs(curv2)<MIN_CURVATURE_SLOPE)) { //LINE SEGMENT CASE
+
+			float eachLength=segmentPointSet[i].x-segmentPointSet[i-1].x;
+			Vector transVec=Vector(eachLength,0,0);
+
+			segmentTranslate.push_back(eachTranslate+transVec.GetRotatedY(eachRotate));
+			segmentRotate.push_back(eachRotate);		
+
+		}
+		else { //CIRCLE SEGMENT CASE
+
+			float eachLength=segmentPointSet[i].x-segmentPointSet[i-1].x;
+			float radius=(curv1+curv2)/2.0;
+			radius=1.0/radius;
+			bool negCurvature;
+
+			if (radius<0.0) {
+				negCurvature=true;
+				radius=fabs(radius);
+			}
+			else
+				negCurvature=false;
+			
+			float circumference=2*PI*radius;
+			float anglesweep_rad=(eachLength*2*PI)/circumference;
+			Vector transVec;
+
+			if (!negCurvature) {
+				transVec=Vector(0,0,-radius);
+				transVec=transVec.GetRotatedY(-anglesweep_rad*180.0/PI);
+				transVec.z=transVec.z+radius;
+			}
+			else {
+				transVec=Vector(0,0,radius);
+				transVec=transVec.GetRotatedY(anglesweep_rad*180.0/PI);
+				transVec.z=transVec.z-radius;
+			}
+
+			float rotAmount;
+			if (!negCurvature)
+				rotAmount=anglesweep_rad*180.0/PI;
+			else
+				rotAmount=-anglesweep_rad*180.0/PI;
+				
+			segmentTranslate.push_back(eachTranslate+transVec.GetRotatedY(eachRotate));			
+			segmentRotate.push_back(eachRotate-rotAmount);
+		}
+
+		//hack for g2 discontinuity
+		//printf("Iteration: %i zVal: %f\n",i,segmentPointSet[i].z);
+		segmentRotate[segmentRotate.size()-1]=segmentRotate[segmentRotate.size()-1]-segmentPointSet[i].z;
+
+	}
+
+}
+
+void ClothoidSpline::setupFitTransform(float endpointWeight) {
+
+	//0.  Assign weights to each point that define how much 
+	//		each point counts in the transformation
+	vector <float> weighting;
+	float totalWeight=0.0f;	
+	for (int i=0;i<arcLengthSamples.size();i++) {
+
+		weighting.push_back(1.0f);
+		
+		if (i==0||i==(arcLengthSamples.size()-1))
+			weighting[i]=endpointWeight;		
+
+		totalWeight+=weighting[i];		
+	}	
+
+	//1.  Translation is given by the centres of mass between the two curves
+
+	centreSketch=Vector(0,0,0);
+	centreSpline=Vector(0,0,0);
+
+	for (int i=0;i<edgePointSet.size();i++) {
+		centreSketch+=edgePointSet[i]*weighting[i];
+	}
+	centreSketch=centreSketch/totalWeight;
+
+	for (int i=0;i<arcLengthSamples.size();i++) {
+		centreSpline+=arcLengthSamples[i]*weighting[i];
+	}
+	centreSpline=centreSpline/totalWeight;
+
+	fitTranslate=centreSketch-centreSpline;	
+
+	//2.  Rotation if found from rotation component of best linear transformation
+	//		(after performing the translation - which leaves only scaling and rotation)
+
+	//Set up matrix A_pq
+	double *A_pq=new double[4];	
+	for (int i=0;i<4;i++) {
+		A_pq[i]=0.0f;
+	}
+
+	for (int i=0;i<edgePointSet.size();i++) {
+		Vector p_i=edgePointSet[i]-centreSketch;
+		Vector q_i=arcLengthSamples[i]-centreSpline;
+		
+		A_pq[0]+=p_i.x*q_i.x*weighting[i];
+		A_pq[1]+=p_i.x*q_i.z*weighting[i];
+		A_pq[2]+=p_i.z*q_i.x*weighting[i];
+		A_pq[3]+=p_i.z*q_i.z*weighting[i];		
+	}
+
+	//Solve for S, where S=sqrt(A_pq^TA_pq)
+	double *A_pqTA_pq=new double[4];
+	A_pqTA_pq[0]=A_pq[0]*A_pq[0]+A_pq[2]*A_pq[2];
+	A_pqTA_pq[1]=A_pq[0]*A_pq[1]+A_pq[2]*A_pq[3];
+	A_pqTA_pq[2]=A_pq[0]*A_pq[1]+A_pq[2]*A_pq[3];
+	A_pqTA_pq[3]=A_pq[1]*A_pq[1]+A_pq[3]*A_pq[3];
+
+	//square root can be found using eigenvalues of this 2x2 matrix
+	Eigen <double> eigen(2);
+	eigen(0,0)=A_pqTA_pq[0];
+	eigen(0,1)=A_pqTA_pq[1];
+	eigen(1,0)=A_pqTA_pq[2];
+	eigen(1,1)=A_pqTA_pq[3];
+	eigen.EigenStuff2();
+
+	double r_1=eigen.GetEigenvalue(0);
+	double r_2=eigen.GetEigenvalue(1);	
+
+	double *sqrtA=new double[4]; //sqrt(A) where A_pq^T A_pq
+	double *Sinv=new double[4];
+	double *R=new double[4];
+
+	if (fabs(r_1)>0.001f&&fabs(r_2)>0.001f) { //If matrix is not RANK DEFICIENT
+
+		double m;
+		double p;
+
+		if (r_2!=r_1) {
+			m=(sqrt(r_2)-sqrt(r_1))/(r_2-r_1);
+			p=(r_2*sqrt(r_1)-r_1*sqrt(r_2))/(r_2-r_1);
+		}
+		else if (r_2==r_1) {
+			m=1/(4*r_1);
+			p=sqrt(r_1)/2;
+		}
+		
+		//sqrt(A)=m*A+p*I
+		sqrtA[0]=m*A_pqTA_pq[0]+p;
+		sqrtA[1]=m*A_pqTA_pq[1];
+		sqrtA[2]=m*A_pqTA_pq[2];
+		sqrtA[3]=m*A_pqTA_pq[3]+p;		
+
+		//S^(-1) = (1/ad-bc)(d -b; -c a)	
+		float determinant=(1/(sqrtA[0]*sqrtA[3]-sqrtA[1]*sqrtA[2]));
+		Sinv[0]=determinant*sqrtA[3];
+		Sinv[1]=determinant*(-sqrtA[1]);
+		Sinv[2]=determinant*(-sqrtA[2]);
+		Sinv[3]=determinant*sqrtA[0];		
+
+		//finally, R=A_pq*S^(-1)		
+		R[0]=A_pq[0]*Sinv[0]+A_pq[1]*Sinv[2];
+		R[1]=A_pq[0]*Sinv[1]+A_pq[1]*Sinv[3];
+		R[2]=A_pq[2]*Sinv[0]+A_pq[3]*Sinv[2];
+		R[3]=A_pq[2]*Sinv[1]+A_pq[3]*Sinv[3];		
+
+		if (fabs(R[0]-R[3])<0.001f&&fabs(R[1]-R[2])>0.001f) {
+
+			if (R[1]<0.0) {
+				fitRotate=-acos(R[0])*180.0/PI;			
+			}
+			else {
+				fitRotate=acos(R[0])*180.0/PI;			
+			}
+		}
+		else {
+
+			//printf("\n\n\n R0 NOT EQUAL to R3!!\n\n\n");
+			if (R[1]<0.0) {
+				fitRotate=acos(R[0])*180.0/PI;
+			}
+			else {
+				fitRotate=-acos(R[0])*180.0/PI;
+			}			
+
+		}
+
+		//printf("\nR[0]: %f R[1]: %f R[2]: %f R[3]: %f det: %f\n",R[0],R[1],R[2],R[3],determinant);
+
+		//printf("fitRotate %f found VIA R\n",fitRotate);
+
+	}
+	else { //MATRIX A_pq is RANK DEFICIENT	
+
+		//use arctangent of 1st tangent to approximate
+		fitRotate=-atan2(edgePointSet[edgePointSet.size()-1].z-edgePointSet[0].z,
+			edgePointSet[edgePointSet.size()-1].x-edgePointSet[0].x)*180.0f/PI;			
+
+	}	
+
+	//Matrix cleanup
+	delete [] A_pq;
+	delete [] A_pqTA_pq;	
+	delete [] sqrtA;
+	delete [] Sinv;
+	delete [] R;
+
+}
+
+void ClothoidSpline::setupFineSamples() {
+
+	float sampleDistance=0.1f;
+
+	vector <float> fineSamples;
+	for (float f=0.0f;f<segmentPointSet[segmentPointSet.size()-1].x;f+=sampleDistance)
+		fineSamples.push_back(f);
+
+	fineSampleVector.clear();
+
+	for (int i=0;i<fineSamples.size();i++) {
+
+		bool pointFound=false;
+		for (int j=0;j<segmentPointSet.size()-1;j++) {			
+
+			if (fineSamples[i]>=segmentPointSet[j].x&&fineSamples[i]<=segmentPointSet[j+1].x) {
+				
+				float curv1=segmentPointSet[j].y;
+				float curv2=segmentPointSet[j+1].y;	
+				float interp=(fineSamples[i]-segmentPointSet[j].x)/(segmentPointSet[j+1].x-segmentPointSet[j].x);
+
+				Vector transVec;
+
+				if (!(fabs(curv2-curv1)<MIN_CURVATURE_SLOPE)) {//CLOTHOID CASE	
+
+					float eachLength=segmentPointSet[j+1].x-segmentPointSet[j].x;
+					float B=sqrt(eachLength/(PI*fabs(curv2-curv1)));
+					float t1=curv1*B*CURV_FACTOR;
+					float t2=curv2*B*CURV_FACTOR;
+					float eacht=t1*(1.0-interp)+t2*(interp);
+
+					transVec=getClothoidPiecePoint(t1,eacht,t2);
+					transVec=transVec*PI*B;
+
+				}
+				else if (fabs(curv2-curv1)<MIN_CURVATURE_SLOPE&&(fabs(curv1)<MIN_CURVATURE_SLOPE||fabs(curv2)<MIN_CURVATURE_SLOPE)) { //LINE SEGMENT CASE	
+
+					transVec=Vector(fineSamples[i]-segmentPointSet[j].x,0,0);					
+
+				}
+				else { //CIRCLE SEGMENT CASE
+
+					float eachLength=segmentPointSet[j+1].x-segmentPointSet[j].x;
+					float radius=2.0f/(curv1+curv2);					
+					bool negCurvature;
+
+					if (radius<0.0) {
+						negCurvature=true;
+						radius=fabs(radius);
+					}
+					else
+						negCurvature=false;
+			
+					float circumference=2*PI*radius;
+					float anglesweep_rad=(eachLength*2*PI)/circumference;
+
+					if (!negCurvature) {
+						transVec=Vector(0,0,-radius);
+						transVec=transVec.GetRotatedY(-interp*anglesweep_rad*180.0/PI);
+						transVec.z=transVec.z+radius;
+					}
+					else {
+						transVec=Vector(0,0,radius);
+						transVec=transVec.GetRotatedY(interp*anglesweep_rad*180.0/PI);
+						transVec.z=transVec.z-radius;
+					}						
+				}
+
+				Vector eachPoint=segmentTranslate[j]+transVec.GetRotatedY(segmentRotate[j]);
+				
+				eachPoint=eachPoint-centreSpline;
+				eachPoint=eachPoint.GetRotatedY(fitRotate);
+				eachPoint+=centreSpline;
+				eachPoint+=fitTranslate;
+
+				eachPoint.y=j; //y component is which segment this is!!
+
+				fineSampleVector.push_back(eachPoint);
+				
+				pointFound=true;
+				break;
+			}
+
+			if (pointFound)
+				break;
+
+		}
+	}
+
+}
+
+vector <Vector> ClothoidSpline::getFineSamples() {
+
+	return fineSampleVector;
+
+}
+
+void ClothoidSpline::setupArcLengthSamples() {
+
+	for (int i=0;i<edgePointSet.size();i++) {
+		for (int j=0;j<segmentPointSet.size()-1;j++) {
+			if (arcLength[i]>=segmentPointSet[j].x&&arcLength[i]<=segmentPointSet[j+1].x) {
+				
+				float curv1=segmentPointSet[j].y;
+				float curv2=segmentPointSet[j+1].y;	
+				float interp=(arcLength[i]-segmentPointSet[j].x)/(segmentPointSet[j+1].x-segmentPointSet[j].x);
+
+				Vector transVec;
+
+				if (!(fabs(curv2-curv1)<MIN_CURVATURE_SLOPE)) {//CLOTHOID CASE	
+
+					float eachLength=segmentPointSet[j+1].x-segmentPointSet[j].x;
+					float B=sqrt(eachLength/(PI*fabs(curv2-curv1)));
+					float t1=curv1*B*CURV_FACTOR;
+					float t2=curv2*B*CURV_FACTOR;
+					float eacht=t1*(1.0-interp)+t2*(interp);
+
+					transVec=getClothoidPiecePoint(t1,eacht,t2);
+					transVec=transVec*PI*B;
+
+				}
+				else if (fabs(curv2-curv1)<MIN_CURVATURE_SLOPE&&(fabs(curv1)<MIN_CURVATURE_SLOPE||fabs(curv2)<MIN_CURVATURE_SLOPE)) { //LINE SEGMENT CASE	
+
+					transVec=Vector(arcLength[i]-segmentPointSet[j].x,0,0);					
+
+				}
+				else { //CIRCLE SEGMENT CASE
+
+					float eachLength=segmentPointSet[j+1].x-segmentPointSet[j].x;
+					float radius=2.0f/(curv1+curv2);					
+					bool negCurvature;
+
+					if (radius<0.0) {
+						negCurvature=true;
+						radius=fabs(radius);
+					}
+					else
+						negCurvature=false;
+			
+					float circumference=2*PI*radius;
+					float anglesweep_rad=(eachLength*2*PI)/circumference;
+
+					if (!negCurvature) {
+						transVec=Vector(0,0,-radius);
+						transVec=transVec.GetRotatedY(-interp*anglesweep_rad*180.0/PI);
+						transVec.z=transVec.z+radius;
+					}
+					else {
+						transVec=Vector(0,0,radius);
+						transVec=transVec.GetRotatedY(interp*anglesweep_rad*180.0/PI);
+						transVec.z=transVec.z-radius;
+					}						
+				}
+
+				arcLengthSamples.push_back(segmentTranslate[j]+transVec.GetRotatedY(segmentRotate[j]));
+
+				break;
+			}
+		}
+	}
+
+}
+
+void ClothoidSpline::drawCanonicalSegments() {
+
+	glColor3f(1,.6,.2);
+	for (int i=0;i<segmentPointSet.size();i++) {
+		glPushMatrix();
+			glTranslatef(fitTranslate.x+centreSpline.x,fitTranslate.y+centreSpline.y,fitTranslate.z+centreSpline.z);
+			glRotatef(fitRotate,0,1,0);
+			glTranslatef(-centreSpline.x,-centreSpline.y,-centreSpline.z);
+
+			glTranslatef(segmentTranslate[i].x,segmentTranslate[i].y+1.0,segmentTranslate[i].z);
+			glutSolidSphere(1.0,8,8);
+
+			glRotatef(segmentRotate[i],0,1,0);
+
+			glBegin(GL_LINES);
+				glVertex3f(0,0,0);
+				glVertex3f(10,0,0);
+			glEnd();
+		glPopMatrix();
+	}
+}
+
+void ClothoidSpline::drawArcLengthSamples() {
+
+	glColor3f(1,.5,.5);
+	for (int i=0;i<arcLengthSamples.size();i++) {
+		glPushMatrix();
+			glTranslatef(fitTranslate.x+centreSpline.x,fitTranslate.y+centreSpline.y,fitTranslate.z+centreSpline.z);
+			glRotatef(fitRotate,0,1,0);
+			glTranslatef(-centreSpline.x,-centreSpline.y,-centreSpline.z);
+
+			glTranslatef(arcLengthSamples[i].x,arcLengthSamples[i].y+1.0,arcLengthSamples[i].z);
+			glutSolidSphere(1.0,10,10);			
+		glPopMatrix();
+	}
+
+}
+
+void ClothoidSpline::recurseThroughWalkMatrix(vector <vector <int>> walkMatrix, int begin, int end, bool *segmentEnd) {
+
+	if (begin+1>=end) {
+		segmentEnd[begin]=true;
+		segmentEnd[end]=true;
+	}
+
+	if (walkMatrix[begin][end]==-1) {
+		segmentEnd[begin]=true;
+		segmentEnd[end]=true;
+	}
+	else {
+		recurseThroughWalkMatrix(walkMatrix, begin, walkMatrix[begin][end], segmentEnd);
+		recurseThroughWalkMatrix(walkMatrix, walkMatrix[begin][end], end, segmentEnd);
+	}
+
+}
+
+float ClothoidSpline::getFitErrors(int num, Vector2f *points, float A, float B) {
+
+	float totalError=0.0;
+
+	for (int i=0;i<num;i++) 	
+		totalError+=fabs(B+(A*points[i][0])-points[i][1]);
+
+	return totalError;
+
+}
+
+inline void ClothoidSpline::mkpoint(TriMesh *mesh, float x, float y, float z)
+{
+	mesh->vertices.push_back(point(x,y,z));
+}
+
+inline void ClothoidSpline::mkface(TriMesh *mesh, int v1, int v2, int v3)
+{
+	mesh->faces.push_back(TriMesh::Face(v1, v2, v3));
+}
+
+inline void ClothoidSpline::mkquad(TriMesh *mesh, int ll, int lr, int ul, int ur)
+{
+	mkface(mesh, ll, lr, ur);
+	mkface(mesh, ll, ur, ul);
+}
+
+Vector ClothoidSpline::getPoint(int segment) {
+
+	Vector returnPoint=arcLengthSamples[segment];	
+
+	returnPoint=returnPoint-centreSpline;
+	returnPoint=returnPoint.GetRotatedY(fitRotate);
+	returnPoint=returnPoint+centreSketch;	
+
+	return returnPoint;
+}
+
+Vector ClothoidSpline::getTangent(int segment, float interp) {
+	return Vector(1,0,0);
+}
+
+void ClothoidSpline::draw() {
+	
+	if (segmentPointSet.empty()||segmentPointSet.size()<2)
+		return;
+	
+	//drawCanonicalSegments();	
+	//drawArcLengthSamples();		
+
+	//for each spline segment
+	glPushMatrix();
+	glTranslatef(0,36,0);
+
+	glLineWidth(DRAW_LINEWIDTH);
+	for (int i=0;i<segmentPointSet.size()-1;i++) {
+
+		//the line segments give us:
+		//	start and end curvatures
+		//	scaling factor - (estimated by arc-length)
+
+		//unit of arc length for clothoid - PI * B * dt
+		//angle tangent forms with x-axis: PI/2 * t^2
+		//curvature is t/B
+
+		//first figure out B
+		//then t1/t2 given by:
+		//t1 = curv1 * B
+		//t2 = curv2 * B	
+
+		glPushMatrix();	
+
+			glTranslatef(fitTranslate.x+centreSpline.x,fitTranslate.y+centreSpline.y,fitTranslate.z+centreSpline.z);
+			glRotatef(fitRotate,0,1,0);
+			glTranslatef(-centreSpline.x,-centreSpline.y,-centreSpline.z);
+
+			glTranslatef(segmentTranslate[i].x,
+					segmentTranslate[i].y,
+					segmentTranslate[i].z);
+			glRotatef(segmentRotate[i],0,1,0);
+
+			int colIndex=i%colorSegments.size();
+			glColor3f(colorSegments[colIndex].x,colorSegments[colIndex].y,colorSegments[colIndex].z);
+
+			float curv1=segmentPointSet[i].y;
+			float curv2=segmentPointSet[i+1].y;		
+
+			if (!(fabs(curv2-curv1)<MIN_CURVATURE_SLOPE)) {//CLOTHOID CASE		
+
+				float eachLength=segmentPointSet[i+1].x-segmentPointSet[i].x;
+				float B=sqrt(eachLength/(PI*fabs(curv2-curv1)));
+
+				float t1=curv1*B*CURV_FACTOR;
+				float t2=curv2*B*CURV_FACTOR;	
+				
+				glBegin(GL_LINE_STRIP);
+
+				//arclength given by: PI*B*fabs(t2-t1)
+				float eachArcLength=PI*B*fabs(t2-t1);
+
+				for (int j=0;j<=(int)ceil(eachArcLength);j++) {
+
+					float interp=(float)j/(float)ceil(eachArcLength);
+					float eacht=t1*(1.0-interp)+t2*(interp);
+					
+					//glColor3f(1.0-interp,0,1);
+					Vector eachPoint=getClothoidPiecePoint(t1,eacht,t2);
+					glVertex3f(PI*B*eachPoint.x,
+								1.0,
+								PI*B*eachPoint.z);
+
+				}
+				
+				glEnd();							
+
+			}
+			else if (fabs(curv2-curv1)<MIN_CURVATURE_SLOPE&&(fabs(curv1)<MIN_CURVATURE_SLOPE||fabs(curv2)<MIN_CURVATURE_SLOPE)) { //LINE SEGMENT CASE
+
+				float eachLength=segmentPointSet[i+1].x-segmentPointSet[i].x;
+				//glColor3f(1.0,0,0);
+				glBegin(GL_LINE_STRIP);
+					glVertex3f(0.0,1.0,0.0);
+					glVertex3f(eachLength,1.0,0.0);
+				glEnd();			
+
+			}
+			else { //CIRCLE SEGMENT CASE
+
+				float eachLength=segmentPointSet[i+1].x-segmentPointSet[i].x;
+				float radius=(curv1+curv2)/2.0;
+				radius=1.0/radius;
+				bool negCurvature;
+
+				if (radius<0.0) {
+					negCurvature=true;
+					radius=fabs(radius);
+				}
+				else
+					negCurvature=false;
+				
+				float circumference=2*PI*radius;
+				float anglesweep_rad=(eachLength*2*PI)/circumference;
+				Vector eachVertex;
+
+				glBegin(GL_LINE_STRIP);
+
+				for (int j=0;j<=(int)ceil(eachLength);j++) {
+
+					float interp=(float)j/(float)ceil(eachLength);
+					//glColor3f(interp,0,0);			
+
+					if (!negCurvature) {
+						eachVertex=Vector(0,0,-radius);
+						eachVertex=eachVertex.GetRotatedY(-interp*anglesweep_rad*180.0/PI);
+						eachVertex.z=eachVertex.z+radius;
+					}
+					else {
+						eachVertex=Vector(0,0,radius);
+						eachVertex=eachVertex.GetRotatedY(interp*anglesweep_rad*180.0/PI);
+						eachVertex.z=eachVertex.z-radius;
+					}
+					
+					glVertex3f(eachVertex.x,1.0,eachVertex.z);
+
+				}
+
+				glEnd();			
+
+			}
+
+		glPopMatrix();	
+
+	}	
+
+	glPopMatrix();
+
+	/*
+	//draw centroid points
+	glColor3f(0,0,1);
+	glPointSize(DRAW_LINEWIDTH);
+	glBegin(GL_POINTS);
+	glVertex3f(centreSpline.x,centreSpline.y,centreSpline.z);
+	glVertex3f(centreSketch.x,centreSketch.y,centreSketch.z);
+	glEnd();
+
+	//draw line connecting centrolds
+	glColor3f(.5,.5,1);
+	glLineWidth(3.0);
+	glBegin(GL_LINES);
+	glVertex3f(centreSpline.x,centreSpline.y,centreSpline.z);
+	glVertex3f(centreSketch.x,centreSketch.y,centreSketch.z);
+	glEnd();
+	*/
+
+	//draw lines between arclength samples and edge points
+	/*
+	glColor3f(.5,.5,1);
+	glLineWidth(3.0);
+	glBegin(GL_LINES);
+	for (int i=0;i<edgePointSet.size();i++) {
+		glVertex3f(edgePointSet[i].x,edgePointSet[i].y,edgePointSet[i].z);
+		Vector eachArcLengthSample=arcLengthSamples[i];
+		eachArcLengthSample-=centreSpline;
+		eachArcLengthSample=eachArcLengthSample.GetRotatedY(fitRotate);
+		eachArcLengthSample+=centreSpline;
+
+		eachArcLengthSample+=(centreSketch-centreSpline);
+		glVertex3f(eachArcLengthSample.x,eachArcLengthSample.y,eachArcLengthSample.z);
+	}
+	glEnd();
+	*/
+
+	//draw the input polyline
+	/*
+	glColor3f(.8,.8,.8);
+	glLineWidth(3.0f);
+	glBegin(GL_LINE_STRIP);		
+	for (int i=0;i<edgePointSet.size();i++) {
+		glVertex3f(edgePointSet[i].x,1.0f,edgePointSet[i].z);
+	}
+	glEnd();
+	*/
+	glColor3f(0,0,0);
+	glPointSize(DRAW_LINEWIDTH);
+	glBegin(GL_POINTS);	
+	for (int i=0;i<edgePointSet.size();i++) {
+		glVertex3f(edgePointSet[i].x,1.1f,edgePointSet[i].z);
+	}
+	glEnd();
+
+}
+
+Vector ClothoidSpline::getClothoidPiecePoint(float t1, float t, float t2) {
+
+	Vector point;		
+
+	//translate and rotate point
+	if (t2>t1) {
+		point=Vector(cosFresnel(t),0.0,sinFresnel(t));
+		point=point-Vector(cosFresnel(t1),0.0,sinFresnel(t1));
+		point=point.GetRotatedY(t1*t1*180.0/PI);		
+	}
+	else {		
+		point=Vector(cosFresnel(t),0.0,sinFresnel(t));
+		point=point-Vector(cosFresnel(t1),0.0,sinFresnel(t1));		
+		point=point.GetRotatedY(t1*t1*180.0/PI+180.0);
+		point.z=-point.z;
+	}
+
+	point.StretchDimensions(Vector(1.0/CURV_FACTOR,1.0/CURV_FACTOR,1.0/CURV_FACTOR));
+
+	return point;
+
+
+}
+
+void ClothoidSpline::drawCurvaturePlot2D() {
+
+	//go orthogonal
+	glViewport(0, 0, glutGet(GLUT_WINDOW_WIDTH), glutGet(GLUT_WINDOW_HEIGHT));
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glOrtho(0.0, glutGet(GLUT_WINDOW_WIDTH), 
+	    0.0, glutGet(GLUT_WINDOW_HEIGHT), -10.0, 10.0);		
+
+	glMatrixMode(GL_MODELVIEW);			
+
+	glPushMatrix();
+
+		glLoadIdentity();		
+		
+		glTranslatef((GLfloat)glutGet(GLUT_WINDOW_WIDTH)*0.25,(GLfloat)glutGet(GLUT_WINDOW_HEIGHT)*0.1,0.0f);
+		glScalef(.5,.5,1);
+
+		if (maxArcLength>100)
+			glScalef((GLfloat)glutGet(GLUT_WINDOW_WIDTH)/maxArcLength,
+					(GLfloat)glutGet(GLUT_WINDOW_HEIGHT)/(maxCurv-minCurv)/2.0,
+					1.0);
+		else
+			glScalef((GLfloat)glutGet(GLUT_WINDOW_WIDTH)/100.0,
+					(GLfloat)glutGet(GLUT_WINDOW_HEIGHT)/(maxCurv-minCurv)/2.0,
+					1.0);
+
+		glLineWidth(2.0f);
+		glColor3f(0,0,0);
+		glBegin(GL_LINES);
+		glVertex3f(0,0.0-minCurv,-1.0);
+		glVertex3f(maxArcLength+20.0f,0.0-minCurv,-1.0);
+		glVertex3f(0,0,-1.0);
+		glVertex3f(0,maxCurv-minCurv,-1.0);
+		glEnd();
+		
+		glColor3f(0.0,0.0,0.0);		
+		glPointSize(DRAW_LINEWIDTH);
+		glBegin(GL_POINTS);
+		for (int i=0;i<edgePointSet.size();i++) { 			
+			glVertex3f(arcLength[i],estCurv[i]-minCurv,1.0);			
+		}		
+		glEnd();
+
+		/*
+		glColor3f(1,1,1);		
+		glPointSize(DRAW_LINEWIDTH);
+		glBegin(GL_POINTS);
+		for (int i=0;i<edgePointSet.size();i++) { 			
+			glVertex3f(arcLength[i],karanEstCurv[i]-minCurv,1.0);			
+		}		
+		glEnd();
+		*/
+
+		glLineWidth(DRAW_LINEWIDTH);
+		
+		for (int i=0;i<segmentPointSet.size()-1;i++) { 	
+			int colIndex=i%colorSegments.size();
+			glColor3f(colorSegments[colIndex].x,colorSegments[colIndex].y,colorSegments[colIndex].z);
+			glBegin(GL_LINES);
+			glVertex3f(segmentPointSet[i].x,segmentPointSet[i].y-minCurv,0.0);
+			glVertex3f(segmentPointSet[i+1].x,segmentPointSet[i+1].y-minCurv,0.0);
+			glEnd();
+		}		
+
+	glPopMatrix();
+	
+
+	//go perspective
+	glViewport(0, 0, glutGet(GLUT_WINDOW_WIDTH), glutGet(GLUT_WINDOW_HEIGHT));
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(80.0,(GLfloat)glutGet(GLUT_WINDOW_WIDTH)/(GLfloat)glutGet(GLUT_WINDOW_HEIGHT),1.0,MAXSELECTDISTANCE);        
+    
+	glMatrixMode(GL_MODELVIEW);
+
+}
+
+float ClothoidSpline::sinFresnel(float t) {
+
+	t=t/CURV_FACTOR;
+
+	float returnVal;
+	if (t>=0.0) {
+		float R=(0.506f*t+1.0f)/(1.79f*t*t+2.054f*t+sqrt(2.0f));
+		float A=1.0f/(0.803f*pow(t,3)+1.886f*t*t+2.524f*t+2.0f);
+
+		returnVal=0.5f-R*cos(0.5f*PI*(A-t*t));
+	}
+	else {
+		t=-t;
+
+		float R=(0.506f*t+1.0f)/(1.79f*t*t+2.054f*t+sqrt(2.0f));
+		float A=1.0f/(0.803f*pow(t,3)+1.886f*t*t+2.524f*t+2.0f);
+
+		returnVal=-(0.5f-R*cos(0.5f*PI*(A-t*t)));
+	}
+	return returnVal*CURV_FACTOR;
+
+}
+
+float ClothoidSpline::cosFresnel(float t) {
+
+	t=t/CURV_FACTOR;
+
+	float returnVal;
+	if (t>=0.0) {
+		float R=(0.506f*t+1.0f)/(1.79f*t*t+2.054f*t+sqrt(2.0f));
+		float A=1.0f/(0.803f*pow(t,3)+1.886f*t*t+2.524f*t+2.0f);
+
+		returnVal=0.5f-R*sin(0.5f*PI*(A-t*t));
+	}
+	else {
+		t=-t;
+	
+		float R=(0.506f*t+1.0f)/(1.79f*t*t+2.054f*t+sqrt(2.0f));
+		float A=1.0f/(0.803f*pow(t,3)+1.886f*t*t+2.524f*t+2.0f);
+
+		returnVal=-(0.5f-R*sin(0.5f*PI*(A-t*t)));
+	}
+	return returnVal*CURV_FACTOR;
+
+}
+
+vector <Vector> ClothoidSpline::getPointSet() {
+	return edgePointSet;
+}
+
+void ClothoidSpline::outputToMayaMEL(int exportClothoidFilename) {
+
+	char *curOutputFilename=new char[150];
+	sprintf(curOutputFilename,"%i.mel",exportClothoidFilename);
+	
+	FILE *fp=fopen(curOutputFilename,"w");
+	delete [] curOutputFilename;
+
+	if (!fp)
+		return;
+
+	fprintf(fp,"requires maya \"4.0\";\n");
+	fprintf(fp,"//curve count %d\n",2);
+	fprintf(fp,"\n");      
+		
+	long numPoints = fineSampleVector.size();
+
+	fprintf(fp,"createNode nurbsCurve -n ClothoidSpline%d;\n",0);
+	fprintf(fp,"setAttr -k off \".v\";\n");
+	fprintf(fp,"setAttr \".cc\" -type \"nurbsCurve\"\n");
+	fprintf(fp,"1 %d 0 no 3\n%d",numPoints-1,numPoints);
+
+	for ( int i = 0; i < numPoints; i++) {
+		  fprintf(fp," %d",i);         
+	}
+
+	fprintf(fp,"\n%d\n",numPoints);          	
+
+	for (int i = 0; i < numPoints; i++) {         
+		fprintf(fp,"%f %f %f\n",fineSampleVector[i].x,0.0f,fineSampleVector[i].z);          
+	}
+
+	fprintf(fp,";\n");  
+	fprintf(fp,"\n");      
+	
+	//%%%%%%%%%%%%%%%%%%%%%%%%%% OUTPUT THE INPUT POLYLINE
+	numPoints=edgePointSet.size();
+	fprintf(fp,"createNode nurbsCurve -n InputPolyline%d;\n",1);
+	fprintf(fp,"setAttr -k off \".v\";\n");
+	fprintf(fp,"setAttr \".cc\" -type \"nurbsCurve\"\n");
+	fprintf(fp,"1 %d 0 no 3\n%d",numPoints-1,numPoints);
+
+	for ( int i = 0; i < numPoints; i++) {
+		  fprintf(fp," %d",i);         
+	}
+
+	fprintf(fp,"\n%d\n",numPoints);          	
+
+	for (int i = 0; i < numPoints; i++) {      
+		fprintf(fp,"%f %f %f\n",edgePointSet[i].x,0.0f,edgePointSet[i].z);          
+	}
+
+	fprintf(fp,";\n");  
+	fprintf(fp,"\n");     
+
+	fclose(fp);
+	
+}
+
+void ClothoidSpline::outputToIllustratorAI(int exportClothoidFilename) {
+
+	char *curOutputFilename=new char[150];
+	sprintf(curOutputFilename,"%i.ai",exportClothoidFilename);
+	
+	FILE *fp=fopen(curOutputFilename,"w");
+	delete [] curOutputFilename;
+
+	if (!fp)
+		return;
+
+	fprintf(fp,"%%!PS-Adobe-3.0\n");
+	fprintf(fp,"%%%%Creator: Rhinoceros\n");
+	fprintf(fp,"%%%%Title: (%i.AI)\n",exportClothoidFilename);
+	fprintf(fp,"%%%%BoundingBox: -23 -10 26 32\n");
+	fprintf(fp,"%%%%DocumentProcessColors: Black\n");
+	fprintf(fp,"%%%%DocumentNeededResources: procset Adobe_packedarray 2.0 0\n");
+	fprintf(fp,"%%%%+ procset Adobe_cmykcolor 1.1 0\n");
+	fprintf(fp,"%%%%+ procset Adobe_cshow 1.1 0\n");
+	fprintf(fp,"%%%%+ procset Adobe_customcolor 1.0 0\n");
+	fprintf(fp,"%%%%+ procset Adobe_typography_AI3 1.0 0\n");
+	fprintf(fp,"%%%%+ procset Adobe_IllustratorA_AI3 1.0 0\n");
+	fprintf(fp,"%%AI3_ColorUsage: Color\n");
+	fprintf(fp,"%%AI3_TemplateBox: 288 384 288 384\n");
+	fprintf(fp,"%%AI3_TileBox: 0 0 576 768\n");
+	fprintf(fp,"%%AI3_DocumentPreview: None\n");
+	fprintf(fp,"%%%%Template:\n");
+	fprintf(fp,"%%%%PageOrigin:0 0\n");
+	fprintf(fp,"%%%%EndComments\n");
+	fprintf(fp,"%%%%BeginProlog\n");
+	fprintf(fp,"%%%%IncludeResource: procset Adobe_packedarray 2.0 0\n");
+	fprintf(fp,"Adobe_packedarray /initialize get exec\n");
+	fprintf(fp,"%%%%IncludeResource: procset Adobe_cmykcolor 1.1 0\n");
+	fprintf(fp,"%%%%IncludeResource: procset Adobe_cshow 1.1 0\n");
+	fprintf(fp,"%%%%IncludeResource: procset Adobe_customcolor 1.0 0\n");
+	fprintf(fp,"%%%%IncludeResource: procset Adobe_typography_AI3 1.0 0\n");
+	fprintf(fp,"%%%%IncludeResource: procset Adobe_IllustratorA_AI3 1.0 0\n");
+	fprintf(fp,"%%%%EndProlog\n");
+	fprintf(fp,"%%%%BeginSetup\n");
+	fprintf(fp,"Adobe_cmykcolor /initialize get exec\n");
+	fprintf(fp,"Adobe_cshow /initialize get exec\n");
+	fprintf(fp,"Adobe_customcolor /initialize get exec\n");
+	fprintf(fp,"Adobe_typography_AI3 /initialize get exec\n");
+	fprintf(fp,"Adobe_IllustratorA_AI3 /initialize get exec\n");
+	fprintf(fp,"%%%%EndSetup\n");
+	fprintf(fp,"0 A\n");
+	fprintf(fp,"0 R\n");
+	fprintf(fp,"0 0 0 1 K\n");
+	fprintf(fp,"0 i 0 J 0 j 1 w 4 M []0 d\n");
+	fprintf(fp,"0 D\n");
+	fprintf(fp,"1 1 1 1 0 0 -1 0 0 0 Lb\n");
+
+	fprintf(fp,"(0) Ln\n");
+	bool firstOfSegment=true;
+	for (int i=0;i<fineSampleVector.size();i++) {
+		if (firstOfSegment) {
+			fprintf(fp,"%f %f m\n",fineSampleVector[i].x,128.0f-fineSampleVector[i].z);
+			firstOfSegment=false;
+		}
+		else
+			fprintf(fp,"%f %f L\n",fineSampleVector[i].x,128.0f-fineSampleVector[i].z);
+
+		if (i<fineSampleVector.size()-1&&fineSampleVector[i].y!=fineSampleVector[i+1].y) {
+			fprintf(fp,"S\n");
+			firstOfSegment=true;
+		}
+	}
+	fprintf(fp,"S\n");
+		
+	for (int i=0;i<edgePointSet.size();i++) {
+		if (i==0)
+			fprintf(fp,"%f %f m\n",edgePointSet[i].x,128.0f-edgePointSet[i].z);
+		else
+			fprintf(fp,"%f %f L\n",edgePointSet[i].x,128.0f-edgePointSet[i].z);
+	}
+	fprintf(fp,"S\n");
+
+	//output line for centroids
+	/*
+	printf("Exporting centroid line.\n");
+	fprintf(fp,"%f %f m\n",centreSpline.x,128.0f-centreSpline.z);
+	fprintf(fp,"%f %f L\n",centreSketch.x,128.0f-centreSketch.z);
+	fprintf(fp,"S\n");
+	*/
+
+	//draw lines between arclength samples and edge points
+	/*
+	for (int i=0;i<edgePointSet.size();i++) {		
+		fprintf(fp,"%f %f m\n",edgePointSet[i].x,128.0f-edgePointSet[i].z);
+				
+		Vector eachArcLengthSample=arcLengthSamples[i];
+		eachArcLengthSample-=centreSpline;
+		eachArcLengthSample=eachArcLengthSample.GetRotatedY(fitRotate);
+		eachArcLengthSample+=centreSpline;
+
+		eachArcLengthSample+=(centreSketch-centreSpline);
+
+		fprintf(fp,"%f %f L\n",eachArcLengthSample.x,128.0f-eachArcLengthSample.z);
+		fprintf(fp,"S\n");
+	}	
+	*/
+
+	//draw 2d curvature plot
+	float xTrans=200.0f;
+	float yScale=1000.0f;
+	fprintf(fp,"%f %f m\n",0.0f+xTrans,-minCurv*yScale);
+	fprintf(fp,"%f %f L\n",maxArcLength+20.0f+xTrans,-minCurv*yScale);
+	fprintf(fp,"S\n");
+	fprintf(fp,"%f %f m\n",0.0f+xTrans,0.0f);
+	fprintf(fp,"%f %f L\n",0.0f+xTrans,(maxCurv-minCurv)*yScale);
+	fprintf(fp,"S\n");
+
+	for (int i=0;i<edgePointSet.size();i++) { 	
+		if (i==0) 
+			fprintf(fp,"%f %f m\n",arcLength[i]+xTrans,(estCurv[i]-minCurv)*yScale);
+		else
+			fprintf(fp,"%f %f L\n",arcLength[i]+xTrans,(estCurv[i]-minCurv)*yScale);
+	}		
+	fprintf(fp,"S\n");
+			
+	for (int i=0;i<segmentPointSet.size()-1;i++) { 			
+		fprintf(fp,"%f %f m\n",segmentPointSet[i].x+xTrans,(segmentPointSet[i].y-minCurv)*yScale);
+		fprintf(fp,"%f %f L\n",segmentPointSet[i+1].x+xTrans,(segmentPointSet[i+1].y-minCurv)*yScale);
+		fprintf(fp,"S\n");
+	}		
+
+	fprintf(fp,"LB\n");
+	fprintf(fp,"%%%%PageTrailer\n");
+	fprintf(fp,"gsave annotatepage grestore showpage\n");
+	fprintf(fp,"%%%%Trailer\n");
+	fprintf(fp,"Adobe_IllustratorA_AI3 /terminate get exec\n");
+	fprintf(fp,"Adobe_typography_AI3 /terminate get exec\n");
+	fprintf(fp,"Adobe_customcolor /terminate get exec\n");
+	fprintf(fp,"Adobe_cshow /terminate get exec\n");
+	fprintf(fp,"Adobe_cmykcolor /terminate get exec\n");
+	fprintf(fp,"Adobe_packedarray /terminate get exec\n");
+	fprintf(fp,"%%%%EOF\n");
+
+	fclose(fp);
+
+}
